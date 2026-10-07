@@ -1,7 +1,16 @@
 <script setup lang="ts">
+import { onMounted } from "vue";
 import ConfigPanel from "../components/ConfigPanel.vue";
 import ProductScene from "../components/ProductScene.vue";
 import SpecOverlay from "../components/SpecOverlay.vue";
+import { useConfiguratorStore } from "../stores/configurator";
+
+const store = useConfiguratorStore();
+
+// 进入配置器时按当前发布的规则包校正配置（例如从旧版本分享链接进入）
+onMounted(() => {
+  store.applyConfiguration(store.configuration);
+});
 </script>
 
 <template>

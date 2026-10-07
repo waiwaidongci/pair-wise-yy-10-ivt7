@@ -1,3 +1,5 @@
+export type GroupId = "color" | "material" | "filter" | "battery" | "stand" | "trim";
+
 export interface ProductOption {
   id: string;
   name: string;
@@ -8,7 +10,7 @@ export interface ProductOption {
 }
 
 export interface ProductGroup {
-  id: "color" | "material" | "filter" | "battery" | "stand" | "trim";
+  id: GroupId;
   name: string;
   summary: string;
   options: ProductOption[];
