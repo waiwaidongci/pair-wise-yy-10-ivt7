@@ -1,14 +1,31 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { storeToRefs } from "pinia";
 import { useConfiguratorStore } from "../stores/configurator";
+import { useRulePackageStore } from "../stores/rulePackages";
 import { decodeConfiguration, formatPrice } from "../utils/share";
+import { computeStaleness } from "../utils/staleness";
 import ProductScene from "../components/ProductScene.vue";
 
 const route = useRoute();
 const router = useRouter();
 const store = useConfiguratorStore();
+const rulePackageStore = useRulePackageStore();
+const { currentPackage } = storeToRefs(rulePackageStore);
 const valid = ref(true);
+
+const referencedVersion = ref<string>("");
+const staleInfo = computed(() => {
+  if (!referencedVersion.value || referencedVersion.value === currentPackage.value.version) {
+    return { stale: false, reasons: [] as string[] };
+  }
+  const referenced =
+    rulePackageStore.publishedPackages.find((pkg) => pkg.version === referencedVersion.value) ??
+    rulePackageStore.packages.find((pkg) => pkg.version === referencedVersion.value);
+  if (!referenced) return { stale: false, reasons: [] as string[] };
+  return computeStaleness(store.configuration, referenced, currentPackage.value);
+});
 
 onMounted(() => {
   const next = decodeConfiguration(String(route.params.payload ?? ""));
@@ -16,7 +33,8 @@ onMounted(() => {
     valid.value = false;
     return;
   }
-  store.applyConfiguration(next);
+  referencedVersion.value = next.rulePackageVersion ?? currentPackage.value.version;
+  store.applyConfiguration(next, referencedVersion.value);
 });
 </script>
 
@@ -27,10 +45,32 @@ onMounted(() => {
         <div>
           <p class="text-xs font-black uppercase tracking-[0.2em] text-blue-600">Shared Configuration</p>
           <h1 class="mt-1 text-3xl font-black text-slate-900">您的 AeroStation S4 配置</h1>
-          <p class="mt-1 text-sm text-slate-500">分享链接已还原颜色、部件、滤芯、电池和支架。</p>
+          <p class="mt-1 text-sm text-slate-500">
+            分享链接已还原颜色、部件、滤芯、电池和支架。
+            <span class="font-bold text-slate-700">引用规则包 v{{ referencedVersion }}</span>
+          </p>
         </div>
         <button class="rounded-xl bg-slate-900 px-5 py-3 text-sm font-bold text-white" @click="router.push('/')">继续调整配置</button>
       </header>
+
+      <div
+        v-if="staleInfo.stale"
+        class="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4"
+      >
+        <p class="text-sm font-black text-amber-800">规则包已更新至 v{{ currentPackage.version }}</p>
+        <p class="mt-1 text-xs text-amber-700">本配置引用的 v{{ referencedVersion }} 已失效，以下报价和规格已按新版重算：</p>
+        <ul class="mt-2 list-inside list-disc space-y-0.5 text-xs text-amber-700">
+          <li v-for="(reason, index) in staleInfo.reasons" :key="index">{{ reason }}</li>
+        </ul>
+      </div>
+      <div
+        v-else-if="referencedVersion && referencedVersion !== currentPackage.version"
+        class="mb-4 rounded-xl border border-slate-200 bg-white p-4"
+      >
+        <p class="text-sm font-black text-slate-700">规则包已更新至 v{{ currentPackage.version }}</p>
+        <p class="mt-1 text-xs text-slate-500">本配置引用的 v{{ referencedVersion }} 未受影响，报价和规格沿用旧版结果。</p>
+      </div>
+
       <div class="grid gap-4 lg:grid-cols-[1fr_320px]">
         <div class="h-[620px]"><ProductScene /></div>
         <aside class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">

@@ -1,4 +1,6 @@
 import type { Configuration } from "../types/product";
+import type { RulePackage } from "../types/rulePackage";
+import { migrateSharedPayload } from "./migrate";
 
 function toBase64Url(value: string): string {
   return btoa(unescape(encodeURIComponent(value))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
@@ -9,23 +11,35 @@ function fromBase64Url(value: string): string {
   return decodeURIComponent(escape(atob(padded)));
 }
 
-export function encodeConfiguration(configuration: Configuration): string {
-  return toBase64Url(JSON.stringify({ v: 1, ...configuration }));
+export interface EncodedConfiguration extends Partial<Configuration> {
+  v?: number;
+  rulePackageId?: string;
+  rulePackageVersion?: string;
 }
 
-export function decodeConfiguration(payload: string): Partial<Configuration> {
+export function encodeConfiguration(configuration: Configuration, rulePackage?: RulePackage): string {
+  const payload: Record<string, unknown> = { v: 1, ...configuration };
+  if (rulePackage) {
+    payload.rulePackageId = rulePackage.id;
+    payload.rulePackageVersion = rulePackage.version;
+  }
+  return toBase64Url(JSON.stringify(payload));
+}
+
+export function decodeConfiguration(payload: string): EncodedConfiguration {
   try {
-    const parsed = JSON.parse(fromBase64Url(payload)) as Partial<Configuration> & { v?: number };
+    const parsed = JSON.parse(fromBase64Url(payload)) as EncodedConfiguration;
     const keys: Array<keyof Configuration> = ["color", "material", "filter", "battery", "stand", "trim"];
     if (keys.some((key) => typeof parsed[key] !== "string")) return {};
-    return parsed;
+    const migrated = migrateSharedPayload(parsed as Record<string, unknown>);
+    return { ...parsed, ...migrated };
   } catch {
     return {};
   }
 }
 
-export function createShareUrl(configuration: Configuration): string {
-  return `${window.location.origin}${window.location.pathname}#/share/${encodeConfiguration(configuration)}`;
+export function createShareUrl(configuration: Configuration, rulePackage?: RulePackage): string {
+  return `${window.location.origin}${window.location.pathname}#/share/${encodeConfiguration(configuration, rulePackage)}`;
 }
 
 export function formatPrice(price: number): string {

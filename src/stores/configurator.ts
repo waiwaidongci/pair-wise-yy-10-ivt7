@@ -1,6 +1,9 @@
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { defineStore } from "pinia";
 import type { CameraPreset, Configuration, ProductGroup, ProductSpec } from "../types/product";
+import type { DependencyRule, RulePackage } from "../types/rulePackage";
+import { useRulePackageStore } from "./rulePackages";
+import { ruleViolated } from "../utils/staleness";
 
 export const productGroups: ProductGroup[] = [
   {
@@ -74,33 +77,87 @@ const defaultConfiguration: Configuration = {
   trim: "subtle",
 };
 
+/** Resolve a configuration against a rule package, enforcing its dependency rules. */
+function resolveConfiguration(input: Partial<Configuration>, pkg: RulePackage): Configuration {
+  const safe = { ...defaultConfiguration, ...input };
+  // Iteratively enforce rules until no violations remain (handles chained constraints).
+  for (let i = 0; i < 8; i++) {
+    let changed = false;
+    for (const rule of pkg.rules) {
+      if (!ruleViolated(rule, safe)) continue;
+      // Apply the rule's resolution: set requires to the first allowed value,
+      // or clear a forbidden field to its default.
+      if (rule.requires) {
+        for (const [groupId, value] of Object.entries(rule.requires)) {
+          if (safe[groupId as keyof Configuration] !== value) {
+            safe[groupId as keyof Configuration] = value as Configuration[keyof Configuration];
+            changed = true;
+          }
+        }
+      }
+      if (rule.forbids) {
+        for (const [groupId, value] of Object.entries(rule.forbids)) {
+          if (safe[groupId as keyof Configuration] === value) {
+            safe[groupId as keyof Configuration] = defaultConfiguration[groupId as keyof Configuration];
+            changed = true;
+          }
+        }
+      }
+    }
+    if (!changed) break;
+  }
+  return safe;
+}
+
 export const useConfiguratorStore = defineStore("configurator", () => {
+  const rulePackageStore = useRulePackageStore();
+
   const configuration = ref<Configuration>({ ...defaultConfiguration });
   const cameraPreset = ref<CameraPreset>("hero");
   const modelRotation = ref(-0.35);
   const shareNotice = ref("");
+  /** The rule package version the current configuration state is consistent with. */
+  const appliedRuleVersion = ref<string>(rulePackageStore.currentPackage.version);
+  /** Set when the current configuration was recomputed due to a rule package change. */
+  const staleNotice = ref("");
+
+  const currentPackage = computed(() => rulePackageStore.currentPackage);
+
+  /** Product groups with prices overridden by the active rule package. */
+  const groupsWithPricing = computed<ProductGroup[]>(() =>
+    productGroups.map((group) => ({
+      ...group,
+      options: group.options.map((option) => ({
+        ...option,
+        price: currentPackage.value.prices[option.id] ?? option.price,
+      })),
+    })),
+  );
 
   const options = computed(() =>
     Object.fromEntries(
-      productGroups.map((group) => [group.id, group.options.find((option) => option.id === configuration.value[group.id])!]),
+      productGroups.map((group) => [
+        group.id,
+        groupsWithPricing.value
+          .find((priced) => priced.id === group.id)!
+          .options.find((option) => option.id === configuration.value[group.id])!,
+      ]),
     ) as Record<ProductGroup["id"], ProductGroup["options"][number]>,
   );
 
+  const violatedRules = computed<DependencyRule[]>(() =>
+    currentPackage.value.rules.filter((rule) => ruleViolated(rule, configuration.value)),
+  );
+
   const dependencyMessage = computed(() => {
-    if (configuration.value.battery === "extended" && configuration.value.material !== "metal") {
-      return "长续航双电池需要搭配拉丝铝合金机身。";
-    }
-    if (configuration.value.stand === "floor" && configuration.value.material !== "metal") {
-      return "立式支架需要铝合金机身提供结构强度。";
-    }
-    if (configuration.value.material === "wood" && configuration.value.filter === "hepa") {
-      return "医疗级滤芯不支持天然胡桃木饰面。";
-    }
+    if (violatedRules.value.length) return violatedRules.value[0].name;
     return "";
   });
 
   const price = computed(() => {
-    const total = 3299 + Object.values(options.value).reduce((sum, option) => sum + option.price, 0);
+    const total =
+      currentPackage.value.basePrice +
+      Object.values(options.value).reduce((sum, option) => sum + option.price, 0);
     return total;
   });
 
@@ -126,10 +183,13 @@ export const useConfiguratorStore = defineStore("configurator", () => {
   });
 
   const isOptionDisabled = (groupId: ProductGroup["id"], optionId: string) => {
-    if (groupId === "battery" && optionId === "extended" && configuration.value.material !== "metal") return true;
-    if (groupId === "stand" && optionId === "floor" && configuration.value.material !== "metal") return true;
-    if (groupId === "filter" && optionId === "hepa" && configuration.value.material === "wood") return true;
-    return false;
+    const candidate = { ...configuration.value, [groupId]: optionId };
+    // Only disable when a rule directly applies to this selection (its `when`
+    // matches the group being chosen). Chained constraints on other groups are
+    // auto-adjusted after selection instead.
+    return currentPackage.value.rules.some(
+      (rule) => rule.when[groupId] === optionId && ruleViolated(rule, candidate),
+    );
   };
 
   function selectOption(groupId: ProductGroup["id"], optionId: string) {
@@ -138,38 +198,56 @@ export const useConfiguratorStore = defineStore("configurator", () => {
       return;
     }
     configuration.value[groupId] = optionId;
-    if (groupId === "material" && optionId !== "metal") {
-      if (configuration.value.battery === "extended") configuration.value.battery = "standard";
-      if (configuration.value.stand === "floor") configuration.value.stand = "desktop";
-    }
-    if (groupId === "material" && optionId === "wood" && configuration.value.filter === "hepa") {
-      configuration.value.filter = "standard";
-    }
+    // Enforce chained constraints (e.g. switching material to matte drops extended battery).
+    configuration.value = resolveConfiguration(configuration.value, currentPackage.value);
     shareNotice.value = "";
+    staleNotice.value = "";
   }
 
-  function applyConfiguration(next: Partial<Configuration>) {
-    const safe = { ...defaultConfiguration, ...next };
-    if (safe.material !== "metal" && safe.battery === "extended") safe.battery = "standard";
-    if (safe.material !== "metal" && safe.stand === "floor") safe.stand = "desktop";
-    if (safe.material === "wood" && safe.filter === "hepa") safe.filter = "standard";
-    configuration.value = safe;
+  function applyConfiguration(next: Partial<Configuration>, ruleVersion?: string) {
+    configuration.value = resolveConfiguration(next, currentPackage.value);
+    if (ruleVersion) appliedRuleVersion.value = ruleVersion;
+    shareNotice.value = "";
   }
 
   function reset() {
     configuration.value = { ...defaultConfiguration };
     cameraPreset.value = "hero";
+    appliedRuleVersion.value = currentPackage.value.version;
+    staleNotice.value = "";
+    shareNotice.value = "";
   }
+
+  // When the rule package changes, recompute the current configuration so it stays valid.
+  watch(
+    () => currentPackage.value.version,
+    (newVersion, oldVersion) => {
+      if (newVersion === oldVersion) return;
+      const before = JSON.stringify(configuration.value);
+      configuration.value = resolveConfiguration(configuration.value, currentPackage.value);
+      const after = JSON.stringify(configuration.value);
+      const changed = before !== after;
+      staleNotice.value = changed
+        ? `规则包已更新至 v${newVersion}，受影响的报价和规格已重算。`
+        : `规则包已更新至 v${newVersion}，当前配置未受影响，沿用旧结果。`;
+      appliedRuleVersion.value = newVersion;
+    },
+  );
 
   return {
     configuration,
     cameraPreset,
     modelRotation,
     shareNotice,
+    staleNotice,
+    appliedRuleVersion,
+    currentPackage,
+    groupsWithPricing,
     options,
     price,
     specs,
     dependencyMessage,
+    violatedRules,
     selectOption,
     applyConfiguration,
     isOptionDisabled,
